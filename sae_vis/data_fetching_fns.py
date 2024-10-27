@@ -34,7 +34,7 @@ from sae_vis.data_storing_fns import (
     SequenceMultiGroupData,
 )
 from sae_vis.model_fns import (
-    AutoEncoder,
+    CrossCoder,
     TransformerLensWrapper,
     to_resid_dir,
 )
@@ -56,8 +56,8 @@ def compute_feat_acts(
     model_A_acts: Float[Tensor, "batch seq d_in"],
     model_B_acts: Float[Tensor, "batch seq d_in"],
     feature_idx: list[int],
-    encoder: AutoEncoder,
-    encoder_B: AutoEncoder | None = None,
+    encoder: CrossCoder,
+    encoder_B: CrossCoder | None = None,
     corrcoef_neurons: RollingCorrCoef | None = None,
     corrcoef_encoder: RollingCorrCoef | None = None,
     corrcoef_encoder_B: RollingCorrCoef | None = None,
@@ -71,9 +71,9 @@ def compute_feat_acts(
             The activations of the model, which the SAE was trained on.
         feature_idx: list[int]
             The features we're computing the activations for. This will be used to index the encoder's weights.
-        encoder: AutoEncoder
+        encoder: CrossCoder
             The encoder object, which we use to calculate the feature activations.
-        encoder_B: Optional[AutoEncoder]
+        encoder_B: Optional[CrossCoder]
             The encoder-B object, which we use to calculate the feature activations.
         corrcoef_neurons: Optional[RollingCorrCoef]
             The object storing the minimal data necessary to compute corrcoef between feature activations & neurons.
@@ -154,7 +154,7 @@ def parse_feature_data(
 ) -> tuple[SaeVisData, dict[str, float]]:
     """Convert generic activation data into a SaeVisData object, which can be used to create the feature-centric vis.
 
-    This function exists so that feature dashboards can be generated without using our AutoEncoder or
+    This function exists so that feature dashboards can be generated without using our CrossCoder or
     TransformerLens(Wrapper) classes. We pass through W_U & other data needed for computing the logit lens, so we don't
     need the models.
 
@@ -170,7 +170,7 @@ def parse_feature_data(
 
         feature_resid_dir_A: Float[Tensor, "feats d_model"]
             The directions that each feature writes to the residual stream.
-            For example, feature_resid_dir_A = encoder.W_dec[feature_indices] # [feats d_autoencoder]
+            For example, feature_resid_dir_A = encoder.W_dec[feature_indices] # [feats d_CrossCoder]
 
         all_resid_post: Float[Tensor, "... d_model"]
             The activations of the final layer of the model before the unembed.
@@ -185,7 +185,7 @@ def parse_feature_data(
         feature_out_dir: Optional[Float[Tensor, "feats d_out"]]
             The directions that each SAE feature writes to the residual stream. This will be the same as
             feature_resid_dir_A if the SAE is in the residual stream (as we will assume if it not provided)
-            For example, feature_out_dir = encoder.W_dec[feature_indices] # [feats d_autoencoder]
+            For example, feature_out_dir = encoder.W_dec[feature_indices] # [feats d_CrossCoder]
 
         corrcoef_neurons: Optional[RollingCorrCoef]
             The object storing the minimal data necessary to compute corrcoef between feature activations & neurons.
@@ -464,8 +464,8 @@ def parse_feature_data(
 
 @torch.inference_mode()
 def _get_feature_data(
-    encoder: AutoEncoder,
-    encoder_B: AutoEncoder | None,
+    encoder: CrossCoder,
+    encoder_B: CrossCoder | None,
     model_A: TransformerLensWrapper,
     model_B: TransformerLensWrapper,
     tokens: Int[Tensor, "batch seq"],
@@ -481,10 +481,10 @@ def _get_feature_data(
     arguments `features` and `minibatch_size_features` from the SaeVisConfig object).
 
     Args:
-        encoder: AutoEncoder
+        encoder: CrossCoder
             The encoder whose features we'll be analyzing.
 
-        encoder_B: AutoEncoder
+        encoder_B: CrossCoder
             The encoder we'll be using as a reference (i.e. finding the B-features with the highest correlation). This
             is only necessary if we're generating the left-hand tables (i.e. cfg.include_left_tables=True).
 
@@ -548,10 +548,10 @@ def _get_feature_data(
     corrcoef_encoder_B = RollingCorrCoef() if encoder_B is not None else None
 
     # Get encoder & decoder directions
-    feature_out_dir_A = encoder.W_dec[feature_indices, 0]  # [feats d_autoencoder]
+    feature_out_dir_A = encoder.W_dec[feature_indices, 0]  # [feats d_CrossCoder]
     feature_resid_dir_A = to_resid_dir(feature_out_dir_A, model_A)  # [feats d_model]
 
-    feature_out_dir_B = encoder.W_dec[feature_indices, 1]  # [feats d_autoencoder]
+    feature_out_dir_B = encoder.W_dec[feature_indices, 1]  # [feats d_CrossCoder]
     feature_resid_dir_B = to_resid_dir(feature_out_dir_B, model_B)  # [feats d_model]
 
     time_logs["(1) Initialization"] = time.time() - t0
@@ -621,12 +621,12 @@ def _get_feature_data(
 
 @torch.inference_mode()
 def get_feature_data(
-    encoder: AutoEncoder,
+    encoder: CrossCoder,
     model_A: HookedTransformer,
     model_B: HookedTransformer,
     tokens: Int[Tensor, "batch seq"],
     cfg: SaeVisConfig,
-    encoder_B: AutoEncoder | None = None,
+    encoder_B: CrossCoder | None = None,
 ) -> SaeVisData:
     """
     This is the main function which users will run to generate the feature visualization data. It batches this
@@ -963,7 +963,7 @@ def parse_prompt_data(
     Gets data needed to create the sequences in the prompt-centric vis (displaying dashboards for the most relevant
     features on a prompt).
 
-    This function exists so that prompt dashboards can be generated without using our AutoEncoder or
+    This function exists so that prompt dashboards can be generated without using our CrossCoder or
     TransformerLens(Wrapper) classes.
 
     Args:
@@ -1160,7 +1160,7 @@ def get_prompt_data(
     # ! Boring setup code
     feature_idx = list(sae_vis_data.feature_data_dict.keys())
     encoder = sae_vis_data.encoder
-    assert isinstance(encoder, AutoEncoder)
+    assert isinstance(encoder, CrossCoder)
     model = sae_vis_data.model
     assert isinstance(model, HookedTransformer)
     cfg = sae_vis_data.cfg

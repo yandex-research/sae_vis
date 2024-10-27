@@ -1091,8 +1091,8 @@ class SaeVisData:
 
     model_A: HookedTransformer | None = None
     model_B: HookedTransformer | None = None
-    encoder: AutoEncoder | None = None
-    encoder_B: AutoEncoder | None = None
+    encoder: CrossCoder | None = None
+    encoder_B: CrossCoder | None = None
 
     def update(self, other: "SaeVisData") -> None:
         """
@@ -1337,8 +1337,8 @@ class SaeVisData:
         filename: str | Path,
         cfg: SaeVisConfig,
         model: HookedTransformer,
-        encoder: AutoEncoder,
-        encoder_B: AutoEncoder,
+        encoder: CrossCoder,
+        encoder_B: CrossCoder,
     ) -> "SaeVisData":
         """
         Loads an SaeVisData instance from JSON file. The config, model & encoder arguments must be user-supplied.

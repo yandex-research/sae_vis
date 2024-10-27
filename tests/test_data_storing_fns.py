@@ -5,13 +5,13 @@ from transformer_lens import HookedTransformer
 
 from sae_vis.data_config_classes import SaeVisConfig
 from sae_vis.data_storing_fns import SaeVisData
-from sae_vis.model_fns import AutoEncoder
+from sae_vis.model_fns import CrossCoder
 
 ROOT_DIR = Path(__file__).parent.parent
 
 
 def test_SaeVisData_create_results_look_reasonable(
-    model: HookedTransformer, autoencoder: AutoEncoder
+    model: HookedTransformer, autoencoder: CrossCoder
 ):
     cfg = SaeVisConfig(hook_point="blocks.2.hook_resid_pre", minibatch_size_tokens=2)
     tokens = model.to_tokens(
@@ -48,7 +48,7 @@ def test_SaeVisData_create_results_look_reasonable(
 
 def test_SaeVisData_create_and_save_feature_centric_vis(
     model: HookedTransformer,
-    autoencoder: AutoEncoder,
+    autoencoder: CrossCoder,
     tmp_path: Path,
 ):
     cfg = SaeVisConfig(hook_point="blocks.2.hook_resid_pre", minibatch_size_tokens=2)

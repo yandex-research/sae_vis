@@ -2,7 +2,7 @@
 
 This is a fork of Callum McDougall's [sae_vis](https://github.com/callummcdougall/sae_vis) that can generate latent dashboards for model-diffing [crosscoders](https://transformer-circuits.pub/2024/crosscoders/index.html). 
 
-TODO: link demo and maybe blog post
+See the "generating latent dashboards" section of this [colab demo](https://colab.research.google.com/drive/124ODki4dUjfi21nuZPHRySALx9I74YHj?usp=sharing) to use it.
 
 Example dashboard:
 ![Dashboard Visualization](./crosscoder_vis_dashboard.png)

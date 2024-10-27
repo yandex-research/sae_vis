@@ -49,6 +49,8 @@ function setupFeatureTables(tablesContainerId, tablesData, tableMetaData) {
 // Define some data which will tell us how to create our tables (this isn't a function of data, it's always the same)
 const featureTablesMetaData = [
     {title: "NEURON ALIGNMENT", columns: ["Index", "Value", "% of L<sub>1</sub>"], dataKey: "neuronAlignment"},
+    {title: "RELATIVE DECODER STRENGTH", columns: ["Model", "Value"], dataKey: "relativeDecoderStrength"},
+    {title: "DECODER COSINE SIM BETWEEN MODELS", columns: ["Value"], dataKey: "decoderCosineSim"},
     {title: "CORRELATED NEURONS", columns: ["Index", "Pearson Corr.", "Cosine Sim."], dataKey: "correlatedNeurons"},
     {title: "CORRELATED FEATURES", columns: ["Index", "Pearson Corr.", "Cosine Sim."], dataKey: "correlatedFeatures"},
     {title: "CORRELATED FEATURES (B-ENCODER)", columns: ["Index", "Pearson Corr.", "Cosine Sim."], dataKey: "correlatedFeaturesB"},

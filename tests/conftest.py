@@ -2,7 +2,7 @@ import pytest
 import torch
 from transformer_lens import HookedTransformer
 
-from sae_vis.model_fns import AutoEncoder, AutoEncoderConfig
+from sae_vis.model_fns import CrossCoder, CrossCoderConfig
 
 
 @pytest.fixture
@@ -13,9 +13,9 @@ def model() -> HookedTransformer:
 
 
 @pytest.fixture
-def autoencoder() -> AutoEncoder:
-    cfg = AutoEncoderConfig(d_in=64, dict_mult=2)
-    autoencoder = AutoEncoder(cfg)
+def autoencoder() -> CrossCoder:
+    cfg = CrossCoderConfig(d_in=64, dict_mult=2)
+    autoencoder = CrossCoder(cfg)
     # set weights and biases to hardcoded values so tests are consistent
     seed1 = torch.tensor([0.1, -0.2, 0.3, -0.4] * 16)  # 64
     seed2 = torch.tensor([0.2, -0.1, 0.4, -0.2] * 32)  # 64 x 2
@@ -30,4 +30,4 @@ def autoencoder() -> AutoEncoder:
         }
     )
 
-    return AutoEncoder(cfg)
+    return CrossCoder(cfg)

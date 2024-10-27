@@ -9,41 +9,13 @@ from jaxtyping import Float, Int
 from torch import Tensor
 from transformer_lens import HookedTransformer, utils
 from transformer_lens.hook_points import HookPoint
+import einops
 
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 
-# @dataclass
-# class AutoEncoderConfig:
-#     '''Class for storing configuration parameters for the autoencoder'''
-#     seed: int = 42
-#     batch_size: int = 32
-#     buffer_mult: int = 384
-#     epochs: int = 10
-#     lr: float = 1e-3
-#     num_tokens: int = int(2e9)
-#
-#     beta1: float = 0.9
-#     beta2: float = 0.99
-#     dict_mult: int = 8
-#     seq_len: int = 128
-#     d_in: int = 2048
-#     enc_dtype: str = "fp32"
-#     remove_rare_dir: bool = False
-#     model_batch_size: int = 64
-#     device: str = "cuda"
-
-#     def __post_init__(self):
-#         '''Using kwargs, so that we can pass in a dict of parameters which might be
-#         a superset of the above, without error.'''
-#         self.buffer_size = self.batch_size * self.buffer_mult
-#         self.buffer_batches = self.buffer_size // self.seq_len
-#         self.dtype = DTYPES[self.enc_dtype]
-#         self.d_hidden = self.d_in * self.dict_mult
-
-
 @dataclass
-class AutoEncoderConfig:
-    """Class for storing configuration parameters for the autoencoder"""
+class CrossCoderConfig:
+    """Class for storing configuration parameters for the CrossCoder"""
 
     d_in: int
     d_hidden: int | None = None
@@ -51,7 +23,7 @@ class AutoEncoderConfig:
 
     l1_coeff: float = 3e-4
 
-    apply_b_dec_to_input: bool = True
+    apply_b_dec_to_input: bool = False
 
     def __post_init__(self):
         assert (
@@ -60,12 +32,12 @@ class AutoEncoderConfig:
         if (self.d_hidden is None) and isinstance(self.dict_mult, int):
             self.d_hidden = self.d_in * self.dict_mult
         elif (self.dict_mult is None) and isinstance(self.d_hidden, int):
-            assert self.d_hidden % self.d_in == 0, "d_hidden must be a multiple of d_in"
+            #assert self.d_hidden % self.d_in == 0, "d_hidden must be a multiple of d_in"
             self.dict_mult = self.d_hidden // self.d_in
 
 
-class AutoEncoder(nn.Module):
-    def __init__(self, cfg: AutoEncoderConfig):
+class CrossCoder(nn.Module):
+    def __init__(self, cfg: CrossCoderConfig):
         super().__init__()
         self.cfg = cfg
 
@@ -73,21 +45,39 @@ class AutoEncoder(nn.Module):
 
         # W_enc has shape (d_in, d_encoder), where d_encoder is a multiple of d_in (cause dictionary learning; overcomplete basis)
         self.W_enc = nn.Parameter(
-            torch.nn.init.kaiming_uniform_(torch.empty(cfg.d_in, cfg.d_hidden))
+            torch.nn.init.kaiming_uniform_(torch.empty(2, cfg.d_in, cfg.d_hidden))
         )
         self.W_dec = nn.Parameter(
-            torch.nn.init.kaiming_uniform_(torch.empty(cfg.d_hidden, cfg.d_in))
+            torch.nn.init.kaiming_uniform_(torch.empty(cfg.d_hidden, 2, cfg.d_in))
         )
         self.b_enc = nn.Parameter(torch.zeros(cfg.d_hidden))
-        self.b_dec = nn.Parameter(torch.zeros(cfg.d_in))
+        self.b_dec = nn.Parameter(torch.zeros(2, cfg.d_in))
         self.W_dec.data[:] = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
 
     def forward(self, x: torch.Tensor):
+        # TODO: lots of this stuff is legacy SAE stuff that probably is wrong / unnecessary
         x_cent = x - self.b_dec * self.cfg.apply_b_dec_to_input
-        acts = F.relu(x_cent @ self.W_enc + self.b_enc)
-        x_reconstruct = acts @ self.W_dec + self.b_dec
-        l2_loss = (x_reconstruct.float() - x.float()).pow(2).sum(-1).mean(0)
-        l1_loss = self.cfg.l1_coeff * (acts.float().abs().sum())
+        x_enc = einops.einsum(
+            x_cent,
+            self.W_enc,
+            "... n_layers d_model, n_layers d_model d_hidden -> ... d_hidden",
+        )
+        acts = F.relu(x_enc + self.b_enc)
+        #x_reconstruct = acts @ self.W_dec + self.b_dec
+        x_reconstruct = einops.einsum(
+            acts,
+            self.W_dec,
+            "... d_hidden, d_hidden n_layers d_model -> ... n_layers d_model",
+        )
+        diff = x_reconstruct.float() - x.float()
+        squared_diff = diff.pow(2)
+        l2_per_batch = einops.reduce(squared_diff, 'batch n_layers d_model -> batch', 'sum')
+        l2_loss = l2_per_batch.mean()
+        #l2_loss = (x_reconstruct.float() - x.float()).pow(2).sum(-1).mean(0)
+        decoder_norms = self.W_dec.norm(dim=-1)
+        # decoder_norms: [d_hidden, n_layers]
+        total_decoder_norm = einops.reduce(decoder_norms, 'd_hidden n_layers -> d_hidden', 'sum')
+        l1_loss = (acts * total_decoder_norm[None, :]).sum(-1).mean(0)
         loss = l2_loss + l1_loss
         return loss, x_reconstruct, acts, l2_loss, l1_loss
 
@@ -99,37 +89,8 @@ class AutoEncoder(nn.Module):
         ) * W_dec_normed
         self.W_dec.grad -= W_dec_grad_proj
 
-    @classmethod
-    def load_from_hf(cls, version: str):
-        """
-        Loads the saved autoencoder from HuggingFace.
-
-        Note, this is a classmethod, because we'll be using it as `auto_encoder = AutoEncoder.load_from_hf("run1")`
-
-        Version is expected to be an int, or "run1" or "run2"
-
-        version 25 is the final checkpoint of the first autoencoder run,
-        version 47 is the final checkpoint of the second autoencoder run.
-        """
-        assert version in ["run1", "run2"]
-        version_num = 25 if version == "run1" else 47
-
-        # Load in state dict
-        state_dict = utils.download_file_from_hf(
-            "NeelNanda/sparse_autoencoder", f"{version_num}.pt", force_is_torch=True
-        )
-        assert isinstance(state_dict, dict)
-        assert set(state_dict.keys()) == {"W_enc", "W_dec", "b_enc", "b_dec"}
-        d_in, d_hidden = state_dict["W_enc"].shape
-
-        # Create autoencoder
-        cfg = AutoEncoderConfig(d_in=d_in, d_hidden=d_hidden)
-        encoder = cls(cfg)
-        encoder.load_state_dict(state_dict)
-        return encoder
-
     def __repr__(self) -> str:
-        return f"AutoEncoder(d_in={self.cfg.d_in}, dict_mult={self.cfg.dict_mult})"
+        return f"CrossCoder(d_in={self.cfg.d_in}, dict_mult={self.cfg.dict_mult})"
 
 
 # # ==============================================================

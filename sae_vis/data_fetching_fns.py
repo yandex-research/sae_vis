@@ -26,7 +26,8 @@ from sae_vis.data_storing_fns import (
     FeatureData,
     FeatureTablesData,
     LogitsHistogramData,
-    LogitsTableData,
+    LogitsATableData,
+    LogitsBTableData,
     SaeVisData,
     SequenceData,
     SequenceGroupData,
@@ -52,7 +53,8 @@ device = get_device()
 
 
 def compute_feat_acts(
-    model_acts: Float[Tensor, "batch seq d_in"],
+    model_A_acts: Float[Tensor, "batch seq d_in"],
+    model_B_acts: Float[Tensor, "batch seq d_in"],
     feature_idx: list[int],
     encoder: AutoEncoder,
     encoder_B: AutoEncoder | None = None,
@@ -81,13 +83,19 @@ def compute_feat_acts(
             The object storing minimal data to compute corrcoef between feature activations & encoder-B features.
     """
     # Get the feature act direction by indexing encoder.W_enc, and the bias by indexing encoder.b_enc
-    feature_act_dir = encoder.W_enc[:, feature_idx]  # (d_in, feats)
+    
+    model_acts = torch.stack([model_A_acts, model_B_acts], dim=0) # [n_layers, batch, seq, d_in]
+    model_acts = model_acts[:, :, 1:, :] # drop bos
+    
+    feature_act_dir = encoder.W_enc[:, :, feature_idx]  # (n_layers, d_in, feats)
     feature_bias = encoder.b_enc[feature_idx]  # (feats,)
 
     # Calculate & store feature activations (we need to store them so we can get the sequence & histogram vis later)
-    x_cent = model_acts - encoder.b_dec * encoder.cfg.apply_b_dec_to_input
+    x_cent = model_acts # - encoder.b_dec * encoder.cfg.apply_b_dec_to_input
+    
+    x_cent = einops.rearrange(x_cent, "n_layers batch seq d_in -> batch seq n_layers d_in")
     feat_acts_pre = einops.einsum(
-        x_cent, feature_act_dir, "batch seq d_in, d_in feats -> batch seq feats"
+        x_cent, feature_act_dir, "batch seq n_layers d_in, n_layers d_in feats -> batch seq feats"
     )
     feat_acts = F.relu(feat_acts_pre + feature_bias)
 
@@ -132,9 +140,11 @@ def parse_feature_data(
     tokens: Int[Tensor, "batch seq"],
     feature_indices: int | list[int],
     all_feat_acts: Float[Tensor, "... feats"],
-    feature_resid_dir: Float[Tensor, "feats d_model"],
+    feature_resid_dir_A: Float[Tensor, "feats d_model"],
+    feature_resid_dir_B: Float[Tensor, "feats d_model"],
     all_resid_post: Float[Tensor, "... d_model"],
-    W_U: Float[Tensor, "d_model d_vocab"],
+    W_U_A: Float[Tensor, "d_model d_vocab"],
+    W_U_B: Float[Tensor, "d_model d_vocab"],
     cfg: SaeVisConfig,
     feature_out_dir: Float[Tensor, "feats d_out"] | None = None,
     corrcoef_neurons: RollingCorrCoef | None = None,
@@ -158,14 +168,14 @@ def parse_feature_data(
         all_feat_acts: Float[Tensor, "... feats"]
             The activations values of the features across the batch & sequence.
 
-        feature_resid_dir: Float[Tensor, "feats d_model"]
+        feature_resid_dir_A: Float[Tensor, "feats d_model"]
             The directions that each feature writes to the residual stream.
-            For example, feature_resid_dir = encoder.W_dec[feature_indices] # [feats d_autoencoder]
+            For example, feature_resid_dir_A = encoder.W_dec[feature_indices] # [feats d_autoencoder]
 
         all_resid_post: Float[Tensor, "... d_model"]
             The activations of the final layer of the model before the unembed.
 
-        W_U: Float[Tensor, "d_model d_vocab"]
+        W_U_A: Float[Tensor, "d_model d_vocab"]
             The model's unembed weights for the logit lens.
 
         cfg: SaeVisConfig
@@ -174,7 +184,7 @@ def parse_feature_data(
 
         feature_out_dir: Optional[Float[Tensor, "feats d_out"]]
             The directions that each SAE feature writes to the residual stream. This will be the same as
-            feature_resid_dir if the SAE is in the residual stream (as we will assume if it not provided)
+            feature_resid_dir_A if the SAE is in the residual stream (as we will assume if it not provided)
             For example, feature_out_dir = encoder.W_dec[feature_indices] # [feats d_autoencoder]
 
         corrcoef_neurons: Optional[RollingCorrCoef]
@@ -206,19 +216,19 @@ def parse_feature_data(
         "(7) Getting data for quantiles": 0.0,
     }
     t0 = time.time()
-
+    
     # Make feature_indices a list, for convenience
     if isinstance(feature_indices, int):
         feature_indices = [feature_indices]
 
     assert (
-        feature_resid_dir.shape[0] == len(feature_indices)
-    ), f"Num features in feature_resid_dir ({feature_resid_dir.shape[0]}) doesn't match {len(feature_indices)=}"
+        feature_resid_dir_A.shape[0] == len(feature_indices)
+    ), f"Num features in feature_resid_dir_A ({feature_resid_dir_A.shape[0]}) doesn't match {len(feature_indices)=}"
 
     if feature_out_dir is not None:
         assert (
             feature_out_dir.shape[0] == len(feature_indices)
-        ), f"Num features in feature_out_dir ({feature_resid_dir.shape[0]}) doesn't match {len(feature_indices)=}"
+        ), f"Num features in feature_out_dir ({feature_resid_dir_A.shape[0]}) doesn't match {len(feature_indices)=}"
 
     # ! Data setup code (defining the main objects we'll eventually return)
     feature_data_dict: dict[int, FeatureData] = {
@@ -230,7 +240,7 @@ def parse_feature_data(
     assert isinstance(
         layout, SaeVisLayoutConfig
     ), f"Error: cfg.feature_centric_layout must be a SaeVisLayoutConfig object, got {type(layout)}"
-
+    
     # ! Calculate all data for the left-hand column visualisations, i.e. the 3 tables
 
     if layout.feature_tables_cfg is not None and feature_out_dir is not None:
@@ -243,13 +253,42 @@ def parse_feature_data(
                 tensor=feature_out_dir, k=layout.feature_tables_cfg.n_rows, largest=True
             )
             feature_out_l1_norm = feature_out_dir.abs().sum(dim=-1, keepdim=True)
+            print(feature_out_l1_norm.shape)
             pct_of_l1: Arr = np.absolute(top3_neurons_aligned.values) / utils.to_numpy(
-                feature_out_l1_norm
+                feature_out_l1_norm.float()
             )
+            print(pct_of_l1.tolist())
             feature_tables_data.update(
                 neuron_alignment_indices=top3_neurons_aligned.indices.tolist(),
                 neuron_alignment_values=top3_neurons_aligned.values.tolist(),
                 neuron_alignment_l1=pct_of_l1.tolist(),
+            )
+            
+        # Table 2?: relative decoder norm strength for crosscoders
+        if layout.feature_tables_cfg.relative_decoder_strength_table: # TODO: update
+            # TODO: we should probably use exact decoder dir rather than resid dir, but should be fine for residual stream crosscoders
+            feature_resid_dir_A_norms = feature_resid_dir_A.norm(dim=-1, keepdim=True) # [feats 1]
+            feature_resid_dir_B_norms = feature_resid_dir_B.norm(dim=-1, keepdim=True) # [feats 1]
+            
+            relative_decoder_strength_base = feature_resid_dir_A_norms / (feature_resid_dir_A_norms + feature_resid_dir_B_norms) # [feats 1]
+            relative_decoder_strength_chat = feature_resid_dir_B_norms / (feature_resid_dir_A_norms + feature_resid_dir_B_norms) # [feats 1]
+
+            relative_decoder_strength = torch.cat([relative_decoder_strength_base, relative_decoder_strength_chat], dim=1) # [feats 2]
+            feature_tables_data.update(
+                relative_decoder_strength_indices=[["Base", "Chat"] for _ in range(len(feature_indices))], # TODO: maybe make this more general
+                relative_decoder_strength_values=relative_decoder_strength.tolist(), # [feats 2]
+            )
+            
+        # Table 3?: decoder cosine similarity between both models
+        if layout.feature_tables_cfg.decoder_cosine_sim_table: # TODO: update
+            # TODO: we should probably use exact decoder dir rather than resid dir, but should be fine for residual stream crosscoders
+            cosine_sims = F.cosine_similarity(feature_resid_dir_A, feature_resid_dir_B, dim=-1) # [feats]
+            if cosine_sims.dim() == 0:
+                cosine_sims = cosine_sims.unsqueeze(0)
+                
+            cosine_sims = cosine_sims.unsqueeze(1) # [feats 1]
+            feature_tables_data.update(
+                decoder_cosine_sim_values=cosine_sims.tolist(), # [feats 1]
             )
 
         # Table 2: neurons correlated with this feature, based on their activations
@@ -299,20 +338,23 @@ def parse_feature_data(
     # ! Get all data for the middle column visualisations, i.e. the two histograms & the logit table
 
     # Get the logits of all features (i.e. the directions this feature writes to the logit output)
-    logits = einops.einsum(
-        feature_resid_dir, W_U, "feats d_model, d_model d_vocab -> feats d_vocab"
+    logits_A = einops.einsum(
+        feature_resid_dir_A, W_U_A, "feats d_model, d_model d_vocab -> feats d_vocab"
+    )
+    logits_B = einops.einsum(
+        feature_resid_dir_B, W_U_B, "feats d_model, d_model d_vocab -> feats d_vocab"
     )
     if any(
         x is not None
-        for x in [layout.act_hist_cfg, layout.logits_hist_cfg, layout.logits_table_cfg]
+        for x in [layout.act_hist_cfg, layout.logits_hist_cfg, layout.logits_table_cfg_A, layout.logits_table_cfg_B]
     ):
-        for i, (feat, logit_vector) in enumerate(zip(feature_indices, logits)):
+        for i, (feat, logit_vector_A, logit_vector_B) in enumerate(zip(feature_indices, logits_A, logits_B)):
             # Get logits histogram data (no title)
             if layout.logits_hist_cfg is not None:
                 feature_data_dict[
                     feat
                 ].logits_histogram_data = LogitsHistogramData.from_data(
-                    data=logit_vector,
+                    data=logit_vector_A,
                     n_bins=layout.logits_hist_cfg.n_bins,
                     tickmode="5 ticks",
                     title=None,
@@ -332,30 +374,56 @@ def parse_feature_data(
                     title=f"ACTIVATIONS<br>DENSITY = {frac_nonzero:.3%}",
                 )
 
-            if layout.logits_table_cfg is not None:
-                # Get logits table data
-                top_logits = TopK(
-                    logit_vector, k=layout.logits_table_cfg.n_rows, largest=True
+            if layout.logits_table_cfg_A is not None and layout.logits_table_cfg_B is not None:
+                # Get logits table data for model A
+                top_logits_A = TopK(
+                    logit_vector_A, k=layout.logits_table_cfg_A.n_rows, largest=True
                 )
-                bottom_logits = TopK(
-                    logit_vector, k=layout.logits_table_cfg.n_rows, largest=False
+                bottom_logits_A = TopK(
+                    logit_vector_A, k=layout.logits_table_cfg_A.n_rows, largest=False
                 )
 
-                top_logits, top_token_ids = (
-                    top_logits.values.tolist(),
-                    top_logits.indices.tolist(),
+
+                top_logits_A, top_token_ids_A = (
+                    top_logits_A.values.tolist(),
+                    top_logits_A.indices.tolist(),
                 )
-                bottom_logits, bottom_token_ids = (
-                    bottom_logits.values.tolist(),
-                    bottom_logits.indices.tolist(),
+                bottom_logits_A, bottom_token_ids_A = (
+                    bottom_logits_A.values.tolist(),
+                    bottom_logits_A.indices.tolist(),
                 )
 
                 # Create a MiddlePlotsData object from this, and add it to the dict
-                feature_data_dict[feat].logits_table_data = LogitsTableData(
-                    bottom_logits=bottom_logits,
-                    bottom_token_ids=bottom_token_ids,
-                    top_logits=top_logits,
-                    top_token_ids=top_token_ids,
+                feature_data_dict[feat].logits_table_data_A = LogitsATableData(
+                    bottom_logits=bottom_logits_A,
+                    bottom_token_ids=bottom_token_ids_A,
+                    top_logits=top_logits_A,
+                    top_token_ids=top_token_ids_A,
+                )
+                
+                # Get logits table data for model B
+                top_logits_B = TopK(
+                    logit_vector_B, k=layout.logits_table_cfg_B.n_rows, largest=True
+                )
+                bottom_logits_B = TopK(
+                    logit_vector_B, k=layout.logits_table_cfg_B.n_rows, largest=False
+                )
+                
+                top_logits_B, top_token_ids_B = (
+                    top_logits_B.values.tolist(),
+                    top_logits_B.indices.tolist(),
+                )
+                bottom_logits_B, bottom_token_ids_B = (
+                    bottom_logits_B.values.tolist(),
+                    bottom_logits_B.indices.tolist(),
+                )
+
+                # Create a MiddlePlotsData object from this, and add it to the dict
+                feature_data_dict[feat].logits_table_data_B = LogitsBTableData(
+                    bottom_logits=bottom_logits_B,
+                    bottom_token_ids=bottom_token_ids_B,
+                    top_logits=top_logits_B,
+                    top_token_ids=top_token_ids_B,
                 )
 
     time_logs["(5) Getting data for histograms"] = time.time() - t0
@@ -369,10 +437,10 @@ def parse_feature_data(
             feature_data_dict[feat].sequence_data = get_sequences_data(
                 tokens=tokens,
                 feat_acts=all_feat_acts[..., i],
-                feat_logits=logits[i],
+                feat_logits=logits_A[i],
                 resid_post=all_resid_post,
-                feature_resid_dir=feature_resid_dir[i],
-                W_U=W_U,
+                feature_resid_dir=feature_resid_dir_A[i],
+                W_U=W_U_A,
                 seq_cfg=layout.seq_cfg,
             )
             # Update the 2nd progress bar (fwd passes & getting sequence data dominates the runtime of these computations)
@@ -398,7 +466,8 @@ def parse_feature_data(
 def _get_feature_data(
     encoder: AutoEncoder,
     encoder_B: AutoEncoder | None,
-    model: TransformerLensWrapper,
+    model_A: TransformerLensWrapper,
+    model_B: TransformerLensWrapper,
     tokens: Int[Tensor, "batch seq"],
     feature_indices: int | list[int],
     cfg: SaeVisConfig,
@@ -469,7 +538,8 @@ def _get_feature_data(
     # ! Data setup code (defining the main objects we'll eventually return, for each of 5 possible vis components)
 
     # Create lists to store the feature activations & final values of the residual stream
-    all_resid_post = []
+    all_resid_post_A = []
+    all_resid_post_B = []
     all_feat_acts = []
 
     # Create objects to store the data for computing rolling stats
@@ -478,8 +548,11 @@ def _get_feature_data(
     corrcoef_encoder_B = RollingCorrCoef() if encoder_B is not None else None
 
     # Get encoder & decoder directions
-    feature_out_dir = encoder.W_dec[feature_indices]  # [feats d_autoencoder]
-    feature_resid_dir = to_resid_dir(feature_out_dir, model)  # [feats d_model]
+    feature_out_dir_A = encoder.W_dec[feature_indices, 0]  # [feats d_autoencoder]
+    feature_resid_dir_A = to_resid_dir(feature_out_dir_A, model_A)  # [feats d_model]
+
+    feature_out_dir_B = encoder.W_dec[feature_indices, 1]  # [feats d_autoencoder]
+    feature_resid_dir_B = to_resid_dir(feature_out_dir_B, model_B)  # [feats d_model]
 
     time_logs["(1) Initialization"] = time.time() - t0
 
@@ -488,46 +561,52 @@ def _get_feature_data(
     for minibatch in token_minibatches:
         # Fwd pass, get model activations
         t0 = time.time()
-        residual, model_acts = model.forward(minibatch, return_logits=False)
+        residual_A, model_A_acts = model_A.forward(minibatch, return_logits=False)
+        residual_B, model_B_acts = model_B.forward(minibatch, return_logits=False)
         time_logs["(2) Forward passes to gather model activations"] += time.time() - t0
 
         # Compute feature activations from this
         t0 = time.time()
         feat_acts = compute_feat_acts(
-            model_acts=model_acts,
+            model_A_acts=model_A_acts,
+            model_B_acts=model_B_acts,
             feature_idx=feature_indices,
             encoder=encoder,
             encoder_B=encoder_B,
-            corrcoef_neurons=corrcoef_neurons,
-            corrcoef_encoder=corrcoef_encoder,
-            corrcoef_encoder_B=corrcoef_encoder_B,
+            # corrcoef_neurons=corrcoef_neurons,
+            # corrcoef_encoder=corrcoef_encoder,
+            # corrcoef_encoder_B=corrcoef_encoder_B,
         )
         time_logs["(3) Computing feature acts from model acts"] += time.time() - t0
 
         # Add these to the lists (we'll eventually concat)
         all_feat_acts.append(feat_acts)
-        all_resid_post.append(residual)
-
+        all_resid_post_A.append(residual_A) # TODO: Idk what this is used for
+        all_resid_post_B.append(residual_B)
+        
         # Update the 1st progress bar (fwd passes & getting sequence data dominates the runtime of these computations)
         if progress is not None:
             progress[0].update(1)
 
     all_feat_acts = torch.cat(all_feat_acts, dim=0)
-    all_resid_post = torch.cat(all_resid_post, dim=0)
+    all_resid_post_A = torch.cat(all_resid_post_A, dim=0)
+    all_resid_post_B = torch.cat(all_resid_post_B, dim=0)
 
     # ! Use the data we've collected to make a MultiFeatureData object
     sae_vis_data, _time_logs = parse_feature_data(
         tokens=tokens,
         feature_indices=feature_indices,
         all_feat_acts=all_feat_acts,
-        feature_resid_dir=feature_resid_dir,
-        all_resid_post=all_resid_post,
-        W_U=model.W_U,
+        feature_resid_dir_A=feature_resid_dir_A,
+        feature_resid_dir_B=feature_resid_dir_B,
+        all_resid_post=all_resid_post_A,
+        W_U_A=model_A.W_U,
+        W_U_B=model_B.W_U,
         cfg=cfg,
-        feature_out_dir=feature_out_dir,
-        corrcoef_neurons=corrcoef_neurons,
-        corrcoef_encoder=corrcoef_encoder,
-        corrcoef_encoder_B=corrcoef_encoder_B,
+        feature_out_dir=feature_out_dir_A,
+        # corrcoef_neurons=corrcoef_neurons,
+        # corrcoef_encoder=corrcoef_encoder,
+        # corrcoef_encoder_B=corrcoef_encoder_B,
         progress=progress,
     )
 
@@ -543,7 +622,8 @@ def _get_feature_data(
 @torch.inference_mode()
 def get_feature_data(
     encoder: AutoEncoder,
-    model: HookedTransformer,
+    model_A: HookedTransformer,
+    model_B: HookedTransformer,
     tokens: Int[Tensor, "batch seq"],
     cfg: SaeVisConfig,
     encoder_B: AutoEncoder | None = None,
@@ -601,17 +681,25 @@ def get_feature_data(
 
     # If the model is from TransformerLens, we need to apply a wrapper to it for standardization
     assert isinstance(
-        model, HookedTransformer
+        model_A, HookedTransformer
     ), "Error: non-HookedTransformer models are not yet supported."
     assert isinstance(
         cfg.hook_point, str
     ), f"Error: cfg.hook_point must be a string, got {cfg.hook_point}"
-    model_wrapper = TransformerLensWrapper(model, cfg.hook_point)
+    model_A_wrapper = TransformerLensWrapper(model_A, cfg.hook_point)
+    
+    assert isinstance(
+        model_B, HookedTransformer
+    ), "Error: non-HookedTransformer models are not yet supported."
+    assert isinstance(
+        cfg.hook_point, str
+    ), f"Error: cfg.hook_point must be a string, got {cfg.hook_point}"
+    model_B_wrapper = TransformerLensWrapper(model_B, cfg.hook_point)
 
     # For each batch of features: get new data and update global data storage objects
     for features in feature_batches:
         new_feature_data, new_time_logs = _get_feature_data(
-            encoder, encoder_B, model_wrapper, tokens, features, cfg, progress
+            encoder, encoder_B, model_A_wrapper, model_B_wrapper, tokens, features, cfg, progress
         )
         sae_vis_data.update(new_feature_data)
         for key, value in new_time_logs.items():

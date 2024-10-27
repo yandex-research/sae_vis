@@ -379,8 +379,10 @@ class TopK:
         if tensor_mask is None or not tensor_mask.any():
             k = min(self.k, tensor.shape[-1])
             topk = tensor.topk(k=k, largest=self.largest)
-            return utils.to_numpy(topk.values), utils.to_numpy(topk.indices)
+            return utils.to_numpy(topk.values.float()), utils.to_numpy(topk.indices)
 
+        tensor = tensor.float() # deal with bfloat16
+        
         # Get the topk of the tensor, but only computed over the values of the tensor which are nontrivial
         assert (
             tensor_mask.shape == tensor.shape[:-1]
@@ -527,6 +529,7 @@ class FeatureStatistics:
             quantile_data = []
         # Else, get the actual stats & quantile values (which we'll use to calculate the quantiles of any new data)
         else:
+            data = data.float() # deal with bfloat16
             _max = data.max(dim=-1).values.tolist()
             frac_nonzero = (data.abs() > 1e-6).float().mean(dim=-1).tolist()
             quantiles_tensor = torch.tensor(quantiles, dtype=data.dtype).to(data.device)
@@ -1044,10 +1047,13 @@ class HistogramData:
         Returns a HistogramData object, with data computed from the inputs. This is to support the goal of only storing
         the minimum necessary data (and making it serializable, for JSON saving).
         """
+        
         # There might be no data, if the feature never activates
         if data.numel() == 0:
             return cls()
 
+        data = data.float() # hack to allow bfloat16
+        
         # Get min and max of data
         max_value = data.max().item()
         min_value = data.min().item()

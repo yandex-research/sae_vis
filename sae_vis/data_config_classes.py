@@ -145,8 +145,20 @@ class LogitsHistogramConfig(BaseComponentConfig):
 
 
 @dataclass
-class LogitsTableConfig(BaseComponentConfig):
-    n_rows: int = 10
+class LogitsTableAConfig(BaseComponentConfig):
+    n_rows: int = 4
+
+    def data_is_contained_in(self, other: BaseComponentConfig) -> bool:
+        assert isinstance(other, self.__class__)
+        return self.n_rows <= other.n_rows
+
+    @property
+    def help_dict(self) -> dict[str, str]:
+        return LOGITS_TABLE_CONFIG_HELP
+
+@dataclass
+class LogitsTableBConfig(BaseComponentConfig):
+    n_rows: int = 4
 
     def data_is_contained_in(self, other: BaseComponentConfig) -> bool:
         assert isinstance(other, self.__class__)
@@ -159,10 +171,12 @@ class LogitsTableConfig(BaseComponentConfig):
 
 @dataclass
 class FeatureTablesConfig(BaseComponentConfig):
-    n_rows: int = 3
-    neuron_alignment_table: bool = True
-    correlated_neurons_table: bool = True
-    correlated_features_table: bool = True
+    n_rows: int = 2
+    neuron_alignment_table: bool = False
+    relative_decoder_strength_table: bool = True
+    decoder_cosine_sim_table: bool = True
+    correlated_neurons_table: bool = False
+    correlated_features_table: bool = False
     correlated_b_features_table: bool = False
 
     def data_is_contained_in(self, other: BaseComponentConfig) -> bool:
@@ -171,6 +185,8 @@ class FeatureTablesConfig(BaseComponentConfig):
             [
                 self.n_rows <= other.n_rows,
                 self.neuron_alignment_table <= other.neuron_alignment_table,
+                self.decoder_cosine_sim_table <= other.decoder_cosine_sim_table,
+                self.relative_decoder_strength_table <= other.relative_decoder_strength_table,
                 self.correlated_neurons_table <= other.correlated_neurons_table,
                 self.correlated_features_table <= other.correlated_features_table,
                 self.correlated_b_features_table <= other.correlated_b_features_table,
@@ -187,7 +203,8 @@ GenericComponentConfig = (
     | SequencesConfig
     | ActsHistogramConfig
     | LogitsHistogramConfig
-    | LogitsTableConfig
+    | LogitsTableAConfig
+    | LogitsTableBConfig
     | FeatureTablesConfig
 )
 
@@ -231,8 +248,10 @@ class SaeVisLayoutConfig:
             The `ActsHistogramConfig` object, which contains all the parameters for the activations histogram.
         logits_hist_cfg:
             The `LogitsHistogramConfig` object, which contains all the parameters for the logits histogram.
-        logits_table_cfg:
-            The `LogitsTableConfig` object, which contains all the parameters for the logits table.
+        logits_table_cfg_A:
+            The `LogitsTableAConfig` object, which contains all the parameters for the logits table A.
+        logits_table_cfg_B:
+            The `LogitsTableBConfig` object, which contains all the parameters for the logits table B.
         feature_tables_cfg:
             The `FeatureTablesConfig` object, which contains all the parameters for the feature tables.
         prompt_cfg:
@@ -245,7 +264,8 @@ class SaeVisLayoutConfig:
     seq_cfg: SequencesConfig | None = None
     act_hist_cfg: ActsHistogramConfig | None = None
     logits_hist_cfg: LogitsHistogramConfig | None = None
-    logits_table_cfg: LogitsTableConfig | None = None
+    logits_table_cfg_A: LogitsTableAConfig | None = None
+    logits_table_cfg_B: LogitsTableBConfig | None = None
     feature_tables_cfg: FeatureTablesConfig | None = None
     prompt_cfg: PromptConfig | None = None
 
@@ -284,8 +304,10 @@ class SaeVisLayoutConfig:
                     self.act_hist_cfg = comp
                 case "LogitsHistogram":
                     self.logits_hist_cfg = comp
-                case "LogitsTable":
-                    self.logits_table_cfg = comp
+                case "LogitsTableA":
+                    self.logits_table_cfg_A = comp
+                case "LogitsTableB":
+                    self.logits_table_cfg_B = comp
                 case "FeatureTables":
                     self.feature_tables_cfg = comp
                 case _:
@@ -371,9 +393,11 @@ class SaeVisLayoutConfig:
     def default_feature_centric_layout(cls) -> "SaeVisLayoutConfig":
         return cls(
             columns=[
-                Column(FeatureTablesConfig()),
                 Column(
-                    ActsHistogramConfig(), LogitsTableConfig(), LogitsHistogramConfig()
+                    ActsHistogramConfig(), 
+                    LogitsTableAConfig(n_rows=4),
+                    LogitsTableBConfig(n_rows=4),
+                    FeatureTablesConfig()
                 ),
                 Column(SequencesConfig(stack_mode="stack-none")),
             ],
@@ -387,7 +411,8 @@ class SaeVisLayoutConfig:
                 Column(
                     PromptConfig(),
                     ActsHistogramConfig(),
-                    LogitsTableConfig(n_rows=5),
+                    LogitsTableAConfig(n_rows=4),
+                    LogitsTableBConfig(n_rows=4),
                     SequencesConfig(top_acts_group_size=10, n_quantiles=0),
                     width=450,
                 ),

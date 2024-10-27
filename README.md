@@ -1,72 +1,15 @@
-Note - I'm planning for a major refactor of this library soon - branch can be found [here](https://github.com/callummcdougall/sae_vis/tree/callum/v3) (containing demo examples too). The current way it works is an unholy patchwork of Python / HTML / JavaScript; the new version is much simpler: the vis is created with a minimal pre-existing HTML framework, instead it's populated using JavaScript, and the only way Python interfaces with JavaScript is to dump a single `DATA` dictionary into the JavaScript page. I've also created an Othello SAE vis, pictured below (also see it on my [personal website homepage](https://www.perfectlynormal.co.uk/)). I plan to get around to pushing updates to this library in late September / early October, so watch this space!
+# Crosscoder Vis
 
-<img src="https://raw.githubusercontent.com/callummcdougall/computational-thread-art/master/example_images/misc/saevis-demos/othellogpt-demo.png" width="800">
+This is a fork of Callum McDougall's [sae_vis](https://github.com/callummcdougall/sae_vis) that can generate latent dashboards for model-diffing [crosscoders](https://transformer-circuits.pub/2024/crosscoders/index.html). 
 
----
+TODO: link demo and maybe blog post
 
-# Summary
+Example dashboard:
+![Dashboard Visualization](./crosscoder_vis_dashboard.png)
 
-This codebase was designed to replicate Anthropic's sparse autoencoder visualisations, which you can see [here](https://transformer-circuits.pub/2023/monosemantic-features/vis/a1.html). The codebase provides 2 different views: a **feature-centric view** (which is like the one in the link, i.e. we look at one particular feature and see things like which tokens fire strongest on that feature) and a **prompt-centric view** (where we look at once particular prompt and see which features fire strongest on that prompt according to a variety of different metrics).
+The dashboards also have activating examples at other ranges (i.e. not just max activating), just like in sae_vis, not shown in the image.
+## Motivation
 
-Install with `pip install sae-vis`. Link to PyPI page [here](https://pypi.org/project/sae-vis/).
+In SAE research, I've found that investing in nice visualizations can be really helpful for rapidly interpreting latents, and (until now) there is no infra to generate latent dashboards for crosscoders. I hope this is helpful to other researchers.
 
-# Features & Links
-
-**Important note** - this repo was significantly restructured in March 2024 (we'll remove this message at the end of April). The recent changes include:
-
-- The ability to view multiple features on the same page (rather than just one feature at a time)
-- D3-backed visualisations (which can do things like add lines to histograms as you hover over tokens)
-- More freedom to customize exactly what the visualisation looks like (we provide full cutomizability, rather than just being able to change certain parameters)
-
-[Here](https://drive.google.com/drive/folders/1sAF3Yv6NjVSjo4wu2Tmu8kMh8it6vhIb?usp=sharing) is a link to a Google Drive folder containing 3 files:
-
-- [**User Guide**](https://docs.google.com/document/d/1QGjDB3iFJ5Y0GGpTwibUVsvpnzctRSHRLI-0rm6wt_k/edit?usp=drive_link), which covers the basics of how to use the repo (the core essentials haven't changed much from the previous version, but there are significantly more features)
-- [**Dev Guide**](https://docs.google.com/document/d/10ctbiIskkkDc5eztqgADlvTufs7uzx5Wj8FE_y5petk/edit?usp=sharing), which we recommend for anyone who wants to understand how the repo works (and make edits to it)
-- [**Demo**](https://colab.research.google.com/drive/1oqDS35zibmL1IUQrk_OSTxdhcGrSS6yO?usp=drive_link), which is a Colab notebook that gives a few examples
-
-In the demo Colab, we show the two different types of vis which are supported by this library:
-
-1. **Feature-centric vis**, where you look at a single feature and see e.g. which sequences in a large dataset this feature fires strongest on.
-
-<!-- <img src="https://raw.githubusercontent.com/callummcdougall/computational-thread-art/master/example_images/misc/sae-snip-1B.png" width="800"> -->
-<img src="https://raw.githubusercontent.com/callummcdougall/computational-thread-art/master/example_images/misc/feature-vis-video.gif" width="800">
-
-2. **Prompt-centric vis**, where you input a custom prompt and see which features score highest on that prompt, according to a variety of possible metrics.
-
-<!-- <img src="https://raw.githubusercontent.com/callummcdougall/computational-thread-art/master/example_images/misc/sae-snip-2.png" width="800"> -->
-<img src="https://raw.githubusercontent.com/callummcdougall/computational-thread-art/master/example_images/misc/prompt-vis-video.gif" width="800">
-
-# Citing this work
-
-To cite this work, you can use this bibtex citation:
-
-```
-@misc{sae_vis,
-    title  = {{SAE Visualizer}},
-    author = {Callum McDougall},
-    howpublished    = {\url{https://github.com/callummcdougall/sae_vis}},
-    year   = {2024}
-}
-```
-
-# Contributing
-
-This project is uses [Poetry](https://python-poetry.org/) for dependency management. After cloning the repo, install dependencies with `poetry install`.
-
-This project uses [Ruff](https://docs.astral.sh/ruff/) for formatting and linting, [Pyright](https://github.com/microsoft/pyright) for type-checking, and [Pytest](https://docs.pytest.org/) for tests. If you submit a PR, make sure that your code passes all checks. You can run all checks with `make check-all`.
-
-# Version history (recording started at `0.2.9`)
-
-- `0.2.9` - added table for pairwise feature correlations (not just encoder-B correlations)
-- `0.2.10` - fix some anomalous characters
-- `0.2.11` - update PyPI with longer description
-- `0.2.12` - fix height parameter of config, add videos to PyPI description
-- `0.2.13` - add to dependencies, and fix SAELens section
-- `0.2.14` - fix mistake in dependencies
-- `0.2.15` - refactor to support eventual scatterplot-based feature browser, fix `&rsquo;` HTML
-- `0.2.16` - allow disabling buffer in feature generation, fix demo notebook, fix sae-lens compatibility & type checking
-- `0.2.17` - use main branch of `sae-lens`
-- `0.2.18` - remove circular dependency with `sae-lens`
-- `0.2.19` - formatting, error-checking
-- `0.2.20` - fix bugs, remove use of `batch_size` in config
-- `0.2.21` - formatting
+**Warning:** I expect a bunch of sae_vis to be broken by my changes, and the code is rough and probably somewhat confusing. My implementation also assumes that the crosscoder was trained on two models, and the visualizations are set up to assume that the first decoder corresponds to a base model, and the second a chat fine-tuned model. I've only used it for a crosscoder trained on Gemma-2 2b base and IT residual streams. I'm not sure if it will work for crosscoders applied to other sites (attn, mlp, etc). I don't plan to maintain this or review PRs, please fork this and modify it if needed!

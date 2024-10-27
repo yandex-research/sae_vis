@@ -17,7 +17,8 @@ from sae_vis.data_config_classes import (
     FeatureTablesConfig,
     GenericComponentConfig,
     LogitsHistogramConfig,
-    LogitsTableConfig,
+    LogitsTableAConfig,
+    LogitsTableBConfig,
     PromptConfig,
     SaeVisConfig,
     SaeVisLayoutConfig,
@@ -29,8 +30,8 @@ from sae_vis.html_fns import (
     uColorMap,
 )
 from sae_vis.model_fns import (
-    AutoEncoder,
-    AutoEncoderConfig,
+    CrossCoder,
+    CrossCoderConfig,
 )
 from sae_vis.utils_fns import (
     FeatureStatistics,
@@ -76,10 +77,12 @@ class FeatureTablesData:
             which features in encoder-B are most correlated with those in the original encoder. Note, this one might be
             absent if we're not using a B-encoder.
     """
-
     neuron_alignment_indices: list[int] = field(default_factory=list)
     neuron_alignment_values: list[float] = field(default_factory=list)
     neuron_alignment_l1: list[float] = field(default_factory=list)
+    relative_decoder_strength_indices: list[int] = field(default_factory=list)
+    relative_decoder_strength_values: list[float] = field(default_factory=list)
+    decoder_cosine_sim_values: list[float] = field(default_factory=list)
     correlated_neurons_indices: list[int] = field(default_factory=list)
     correlated_neurons_pearson: list[float] = field(default_factory=list)
     correlated_neurons_cossim: list[float] = field(default_factory=list)
@@ -122,6 +125,24 @@ class FeatureTablesData:
                     self.neuron_alignment_indices,
                     self.neuron_alignment_values,
                     self.neuron_alignment_l1,
+                )
+            ]
+        
+        # Store the decoder cosine similarity data, if it exists
+        if len(self.decoder_cosine_sim_values) > 0:
+            #assert len(self.relative_decoder_strength_indices) >= cfg.n_rows, f"Not enough rows! len: {len(self.relative_decoder_strength_indices)}, cfg.n_rows: {cfg.n_rows}"
+            data["decoderCosineSim"] = [
+                {"value": f"{V:+.3f}"}
+                for V in self.decoder_cosine_sim_values
+            ]
+
+        if len(self.relative_decoder_strength_indices) > 0:
+            assert len(self.relative_decoder_strength_indices) >= cfg.n_rows, f"Not enough rows! len: {len(self.relative_decoder_strength_indices)}, cfg.n_rows: {cfg.n_rows}"
+            data["relativeDecoderStrength"] = [
+                {"index": I, "value": f"{V:+.3f}"}
+                for I, V in zip(
+                    self.relative_decoder_strength_indices,
+                    self.relative_decoder_strength_values,
                 )
             ]
 
@@ -238,7 +259,7 @@ class LogitsHistogramData(HistogramData):
 
 @dataclass_json
 @dataclass
-class LogitsTableData:
+class LogitsATableData:
     bottom_token_ids: list[int] = field(default_factory=list)
     bottom_logits: list[float] = field(default_factory=list)
     top_token_ids: list[int] = field(default_factory=list)
@@ -246,7 +267,7 @@ class LogitsTableData:
 
     def _get_html_data(
         self,
-        cfg: LogitsTableConfig,
+        cfg: LogitsTableAConfig,
         decode_fn: Callable[[int | list[int]], str | list[str]],
         id_suffix: str,
         column: int | tuple[int, int],
@@ -256,7 +277,7 @@ class LogitsTableData:
         Converts data -> HTML object, for the logits table (i.e. the top and bottom affected tokens by this feature).
         """
         # Crop the lists to `cfg.n_rows` (first checking the config doesn't ask for more rows than we have)
-        assert cfg.n_rows <= len(self.bottom_logits)
+        assert cfg.n_rows <= len(self.bottom_logits), f"cfg.n_rows: {cfg.n_rows}, len(self.bottom_logits): {len(self.bottom_logits)}"
         bottom_token_ids = self.bottom_token_ids[: cfg.n_rows]
         bottom_logits = self.bottom_logits[: cfg.n_rows]
         top_token_ids = self.top_token_ids[: cfg.n_rows]
@@ -274,9 +295,7 @@ class LogitsTableData:
         pos_str = to_str_tokens(decode_fn, top_token_ids[: cfg.n_rows])
 
         # Read HTML from file, and replace placeholders with real ID values
-        html_str = (
-            Path(__file__).parent / "html" / "logits_table_template.html"
-        ).read_text()
+        html_str = (Path(__file__).parent / "html" / "logits_table_A_template.html").read_text()
         html_str = html_str.replace("LOGITS_TABLE_ID", f"logits-table-{id_suffix}")
 
         # Create object for storing JS data
@@ -304,7 +323,76 @@ class LogitsTableData:
 
         return HTML(
             html_data={column: html_str},
-            js_data={"logitsTableData": {id_suffix: data}},
+            js_data={"logitsATableData": {id_suffix: data}},
+        )
+
+@dataclass_json
+@dataclass
+class LogitsBTableData:
+    bottom_token_ids: list[int] = field(default_factory=list)
+    bottom_logits: list[float] = field(default_factory=list)
+    top_token_ids: list[int] = field(default_factory=list)
+    top_logits: list[float] = field(default_factory=list)
+
+    def _get_html_data(
+        self,
+        cfg: LogitsTableBConfig,
+        decode_fn: Callable[[int | list[int]], str | list[str]],
+        id_suffix: str,
+        column: int | tuple[int, int],
+        component_specific_kwargs: dict[str, Any] = {},
+    ) -> HTML:
+        """
+        Converts data -> HTML object, for the logits table (i.e. the top and bottom affected tokens by this feature).
+        """
+        # Crop the lists to `cfg.n_rows` (first checking the config doesn't ask for more rows than we have)
+        assert cfg.n_rows <= len(self.bottom_logits), f"cfg.n_rows: {cfg.n_rows}, len(self.bottom_logits): {len(self.bottom_logits)}"
+        bottom_token_ids = self.bottom_token_ids[: cfg.n_rows]
+        bottom_logits = self.bottom_logits[: cfg.n_rows]
+        top_token_ids = self.top_token_ids[: cfg.n_rows]
+        top_logits = self.top_logits[: cfg.n_rows]
+
+        # Get the negative and positive background values (darkest when equals max abs)
+        max_value = max(
+            max(top_logits[: cfg.n_rows]), -min(bottom_logits[: cfg.n_rows])
+        )
+        neg_bg_values = np.absolute(bottom_logits[: cfg.n_rows]) / max_value
+        pos_bg_values = np.absolute(top_logits[: cfg.n_rows]) / max_value
+
+        # Get the string tokens, using the decode function
+        neg_str = to_str_tokens(decode_fn, bottom_token_ids[: cfg.n_rows])
+        pos_str = to_str_tokens(decode_fn, top_token_ids[: cfg.n_rows])
+
+        # Read HTML from file, and replace placeholders with real ID values
+        html_str = (Path(__file__).parent / "html" / "logits_table_B_template.html").read_text()
+        html_str = html_str.replace("LOGITS_TABLE_ID_B", f"logits-table-B-{id_suffix}")
+
+        # Create object for storing JS data
+        data: dict[str, list[dict[str, str | float]]] = {
+            "negLogits": [],
+            "posLogits": [],
+        }
+
+        # Get data for the tables of pos/neg logits
+        for i in range(len(neg_str)):
+            data["negLogits"].append(
+                {
+                    "symbol": unprocess_str_tok(neg_str[i]),
+                    "value": round(bottom_logits[i], 2),
+                    "color": f"rgba(255,{int(255*(1-neg_bg_values[i]))},{int(255*(1-neg_bg_values[i]))},0.5)",
+                }
+            )
+            data["posLogits"].append(
+                {
+                    "symbol": unprocess_str_tok(pos_str[i]),
+                    "value": round(top_logits[i], 2),
+                    "color": f"rgba({int(255*(1-pos_bg_values[i]))},{int(255*(1-pos_bg_values[i]))},255,0.5)",
+                }
+            )
+
+        return HTML(
+            html_data={column: html_str},
+            js_data={"logitsBTableData": {id_suffix: data}},
         )
 
 
@@ -768,7 +856,8 @@ class SequenceMultiGroupData:
 GenericData = (
     FeatureTablesData
     | ActsHistogramData
-    | LogitsTableData
+    | LogitsATableData
+    | LogitsBTableData
     | LogitsHistogramData
     | SequenceMultiGroupData
     | SequenceData
@@ -802,8 +891,11 @@ class FeatureData:
     acts_histogram_data: ActsHistogramData = field(
         default_factory=lambda: ActsHistogramData()
     )
-    logits_table_data: LogitsTableData = field(
-        default_factory=lambda: LogitsTableData()
+    logits_table_data_A: LogitsATableData = field(
+        default_factory=lambda: LogitsATableData()
+    )
+    logits_table_data_B: LogitsBTableData = field(
+        default_factory=lambda: LogitsBTableData()
     )
     logits_histogram_data: LogitsHistogramData = field(
         default_factory=lambda: LogitsHistogramData()
@@ -821,7 +913,8 @@ class FeatureData:
         CONFIG_CLASS_MAP = {
             FeatureTablesConfig.__name__: self.feature_tables_data,
             ActsHistogramConfig.__name__: self.acts_histogram_data,
-            LogitsTableConfig.__name__: self.logits_table_data,
+            LogitsTableAConfig.__name__: self.logits_table_data_A,
+            LogitsTableBConfig.__name__: self.logits_table_data_B,
             LogitsHistogramConfig.__name__: self.logits_histogram_data,
             SequencesConfig.__name__: self.sequence_data,
             PromptConfig.__name__: self.prompt_data,
@@ -996,7 +1089,8 @@ class SaeVisData:
     feature_stats: FeatureStatistics = field(default_factory=FeatureStatistics)
     cfg: SaeVisConfig = field(default_factory=SaeVisConfig)
 
-    model: HookedTransformer | None = None
+    model_A: HookedTransformer | None = None
+    model_B: HookedTransformer | None = None
     encoder: AutoEncoder | None = None
     encoder_B: AutoEncoder | None = None
 
@@ -1015,37 +1109,40 @@ class SaeVisData:
     def create(
         cls,
         encoder: nn.Module,
-        model: HookedTransformer,
+        model_A: HookedTransformer,
+        model_B: HookedTransformer,
         tokens: Int[Tensor, "batch seq"],
         cfg: SaeVisConfig,
-        encoder_B: AutoEncoder | None = None,
+        encoder_B: CrossCoder | None = None,
     ) -> "SaeVisData":
         from sae_vis.data_fetching_fns import get_feature_data
 
-        # If encoder isn't an AutoEncoder, we wrap it in one
-        if not isinstance(encoder, AutoEncoder):
-            assert set(
-                encoder.state_dict().keys()
-            ).issuperset(
-                {"W_enc", "W_dec", "b_enc", "b_dec"}
-            ), "If encoder isn't an AutoEncoder, it should have weights 'W_enc', 'W_dec', 'b_enc', 'b_dec'"
-            d_in, d_hidden = encoder.W_enc.shape
-            device = encoder.W_enc.device
-            encoder_cfg = AutoEncoderConfig(d_in=d_in, d_hidden=d_hidden)
-            encoder_wrapper = AutoEncoder(encoder_cfg).to(device)
-            encoder_wrapper.load_state_dict(encoder.state_dict(), strict=False)
-        else:
-            encoder_wrapper = encoder
+        # If encoder isn't an CrossCoder, we wrap it in one
+        # if not isinstance(encoder, CrossCoder):
+        #     assert set(
+        #         encoder.state_dict().keys()
+        #     ).issuperset(
+        #         {"W_enc", "W_dec", "b_enc", "b_dec"}
+        #     ), "If encoder isn't an CrossCoder, it should have weights 'W_enc', 'W_dec', 'b_enc', 'b_dec'"
+        #     d_in, d_hidden = encoder.W_enc.shape
+        #     device = encoder.W_enc.device
+        #     encoder_cfg = CrossCoderConfig(d_in=d_in, d_hidden=d_hidden)
+        #     encoder_wrapper = CrossCoder(encoder_cfg).to(device)
+        #     encoder_wrapper.load_state_dict(encoder.state_dict(), strict=False)
+        # else:
+        encoder_wrapper = encoder
 
         sae_vis_data = get_feature_data(
             encoder=encoder_wrapper,
-            model=model,
+            model_A=model_A,
+            model_B=model_B,
             tokens=tokens,
             cfg=cfg,
             encoder_B=encoder_B,
         )
         sae_vis_data.cfg = cfg
-        sae_vis_data.model = model
+        sae_vis_data.model_A = model_A
+        sae_vis_data.model_B = model_B
         sae_vis_data.encoder = encoder_wrapper
         sae_vis_data.encoder_B = encoder_B
 
@@ -1076,9 +1173,9 @@ class SaeVisData:
         )
 
         # Get tokenize function (we only need to define it once)
-        assert self.model is not None
-        assert self.model.tokenizer is not None
-        decode_fn = get_decode_html_safe_fn(self.model.tokenizer)
+        assert self.model_A is not None
+        assert self.model_A.tokenizer is not None
+        decode_fn = get_decode_html_safe_fn(self.model_A.tokenizer)
 
         # Create iterator
         iterator = list(self.feature_data_dict.items())
@@ -1101,7 +1198,6 @@ class SaeVisData:
             "DASHBOARD_DATA": HTML_OBJ.js_data,
         }
 
-        # Save our full HTML
         HTML_OBJ.get_html(
             layout=self.cfg.feature_centric_layout,
             filename=filename,

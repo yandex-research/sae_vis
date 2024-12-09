@@ -13,6 +13,33 @@ import einops
 
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 
+
+class TopK(nn.Module):
+
+    def __init__(self, k: int) -> None:
+        super().__init__()
+        self.k = k
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        topk = torch.topk(x, k=self.k, dim=-1)
+        values = F.relu(topk.values)
+        # make all other values 0
+        result = torch.zeros_like(x)
+        result.scatter_(-1, topk.indices, values)
+        return result
+    
+
+class JumpReLU(nn.Module):
+
+    def __init__(self, threshold: float = 0.001) -> None:
+        super().__init__()
+        self.threshold = threshold
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.mul(x.ge(self.threshold))
+
+
+
 @dataclass
 class CrossCoderConfig:
     """Class for storing configuration parameters for the CrossCoder"""
@@ -20,10 +47,11 @@ class CrossCoderConfig:
     d_in: int
     d_hidden: int | None = None
     dict_mult: int | None = None
-
     l1_coeff: float = 3e-4
-
     apply_b_dec_to_input: bool = False
+    activation_fn: str = "relu"
+    jumprelu_threshold: float = 0.001
+    topk: int = 50
 
     def __post_init__(self):
         assert (
@@ -54,32 +82,36 @@ class CrossCoder(nn.Module):
         self.b_dec = nn.Parameter(torch.zeros(2, cfg.d_in))
         self.W_dec.data[:] = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
 
+        # Init activation
+        if cfg.activation_fn == "relu":
+            self.activation_fn = F.relu
+        elif cfg.activation_fn == "jumprelu":
+            self.activation_fn = JumpReLU(cfg.jumprelu_threshold)
+        elif cfg.activation_fn == "topk":
+            self.activation_fn = TopK(cfg.topk)
+        else:
+            raise ValueError("Unknown activation fn")
+        
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        z = einops.einsum(x, self.W_enc, 'b m d, m d h -> b h')
+        z = self.activation_fn(z + self.b_enc)
+        return z
+    
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        x = einops.einsum(z, self.W_dec, 'b h, h m d -> b m d')
+        x = x + self.b_dec
+        return x
+
     def forward(self, x: torch.Tensor):
-        # TODO: lots of this stuff is legacy SAE stuff that probably is wrong / unnecessary
-        x_cent = x - self.b_dec * self.cfg.apply_b_dec_to_input
-        x_enc = einops.einsum(
-            x_cent,
-            self.W_enc,
-            "... n_layers d_model, n_layers d_model d_hidden -> ... d_hidden",
-        )
-        acts = F.relu(x_enc + self.b_enc)
-        #x_reconstruct = acts @ self.W_dec + self.b_dec
-        x_reconstruct = einops.einsum(
-            acts,
-            self.W_dec,
-            "... d_hidden, d_hidden n_layers d_model -> ... n_layers d_model",
-        )
-        diff = x_reconstruct.float() - x.float()
-        squared_diff = diff.pow(2)
-        l2_per_batch = einops.reduce(squared_diff, 'batch n_layers d_model -> batch', 'sum')
-        l2_loss = l2_per_batch.mean()
-        #l2_loss = (x_reconstruct.float() - x.float()).pow(2).sum(-1).mean(0)
-        decoder_norms = self.W_dec.norm(dim=-1)
-        # decoder_norms: [d_hidden, n_layers]
-        total_decoder_norm = einops.reduce(decoder_norms, 'd_hidden n_layers -> d_hidden', 'sum')
-        l1_loss = (acts * total_decoder_norm[None, :]).sum(-1).mean(0)
-        loss = l2_loss + l1_loss
-        return loss, x_reconstruct, acts, l2_loss, l1_loss
+        z = self.encode(x)
+        x_rec = self.decode(z)
+        # Reconstruction losses
+        l2_rec_loss = F.mse_loss(x_rec, x)
+        # Activation losses
+        dec_norms = self.W_dec.norm(dim=-1).sum(dim=-1)
+        l1_act_loss = (dec_norms * z).mean()
+        loss = l2_rec_loss + l1_act_loss
+        return loss, x_rec, z, l2_rec_loss, l1_act_loss
 
     @torch.no_grad()
     def remove_parallel_component_of_grads(self):
